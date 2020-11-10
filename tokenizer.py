@@ -14,7 +14,7 @@ this version from gist.github.com/ppope > preprocess_twitter.py
 
 light edits by amackcrane, mostly inspired by the test case given at bottom
 """
-
+from typing import List
 import sys
 import re
 
@@ -34,7 +34,7 @@ def allcaps(text: 're.Match[str]') -> str:
     return str_text.lower() + " <allcaps> " # amackcrane added trailing space
 
 
-def tokenize(text: str) -> str:
+def tokenize(text: str) -> List[str]:
     # Different regex parts for smiley faces
     eyes = r"[8:=;]"
     nose = r"['`\-]?"
@@ -64,10 +64,10 @@ def tokenize(text: str) -> str:
     # amackcrane additions
     text = re_sub(r"([a-zA-Z<>()])([?!.:;,])", r"\1 \2")
     text = re_sub(r"\(([a-zA-Z<>]+)\)", r"( \1 )")
-    text = re_sub(r"  ", r" ")
+    text = re_sub(r"\s+", r" ")
     text = re_sub(r" ([A-Z]){2,} ", allcaps)
     
-    return text.lower()
+    return text.lower().split()
 
 if __name__ == '__main__':
     #_, text = sys.argv  # kaggle envt breaks this -amackcrane
