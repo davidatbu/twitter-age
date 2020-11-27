@@ -1,88 +1,102 @@
-import re
-import time
-from pathlib import Path
-from transformers import BertTokenizer, BertModel, BertConfig
-import torch
-import pandas as pd
-import sys
-
-
-class Tee(object):
-    def __init__(self, *files):
-        self.files = files
-
-    def write(self, obj):
-        for f in self.files:
-            f.write(obj)
-
-DATA_DIR = Path("/projectnb/llamagrp/davidat/twitter_age/")
-
-f = open(DATA_DIR/"vaping.log", "w")
-backup = sys.stdout
-sys.stdout = Tee(sys.stdout, f)
-tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
-config = BertConfig.from_pretrained("bert-base-uncased", output_hidden_states=True)
-
-model = BertModel.from_pretrained("bert-base-uncased", config=config)
-model.to('cuda')
+from __future__ import annotations
 import numpy as np
 
-df = pd.read_csv(DATA_DIR /"labeledData.csv", encoding="utf-8")
-df = df[df["labeled age"].notna()]
-adf = pd.DataFrame()
-usernames = []
-ages = []
-centroids = []
-data = []
-idx = 0
-begin = time.time()
-for index, row in df.iterrows():
-    idx = idx + 1
-    username = row["user.name"]
-    age = row["labeled age"]
-    ndf = pd.read_csv(DATA_DIR / "UserTweets/" / (username + ".csv"), encoding="utf-8")
-    ndf = ndf[ndf["text"].notna()]
-    ndf["contents"] = ndf["text"].map(lambda x: str(x))
-    ndf["contents"] = ndf["contents"].map(lambda x: re.sub('"', "", x))
-    ndf["contents"] = ndf["contents"].map(lambda x: re.sub("\n", " ", x))
-    ndf["contents"] = ndf["contents"].map(lambda x: x.lower())
-    ndf = ndf[ndf["contents"].notna()]
-    if ndf.shape[0] == 0:
-        continue
-    ndf["input_ids"] = ndf["contents"].apply(
-        lambda b: torch.tensor(tokenizer.encode(str(b))).unsqueeze(0).cuda()
+import torch
+import tqdm
+from more_itertools import chunked
+
+from logging import FileHandler, Logger, StreamHandler
+from dnips.data import JsonlDataset, make_selector
+from dnips.nn.tsfmrs import Pipeline
+
+
+import typer
+from pathlib import Path
+import pandas as pd
+from typing import List
+
+logger = Logger(__name__)
+
+
+def main(
+    out_dir: Path,
+    users_csv: Path,
+    json_dir: Path,
+    batch_size: int = 500,
+    mdl_name: str = "bert-base-uncased",
+) -> None:
+    log_file = out_dir / "bert_feature_extract.log"
+    logger.addHandler(FileHandler(log_file))
+    logger.addHandler(StreamHandler())
+
+    logger.info("Called with out_dir, users_csv, json_dir, batch_size")
+
+    pipeline = Pipeline(mdl_name)
+
+    expected_users = set(
+        u.strip("@").lower()
+        for u in pd.read_csv(
+            users_csv,
+            encoding="utf-8",
+            usecols=[
+                "Author",
+            ],
+            na_filter=False,
+        )["Author"].tolist()
     )
-    ndf["interm"] = ndf["input_ids"].apply(lambda b: model(b))
-    ndf["embedding"] = ndf["interm"].apply(
-        lambda b: b[0][0][0].tolist()
-        + b[2][12][0][0].tolist()
-        + b[2][11][0][0].tolist()
-        + b[2][10][0][0].tolist()
+
+    jsonl_dset = JsonlDataset(
+        list(json_dir.glob("*.jsonl")),
+        selector=make_selector("renderedContent"),
     )
 
-    # ndf['embedding']=ndf['input_ids'].apply(lambda b: model(b)[0][0][0].tolist())
-    print(idx, df.shape[0])
-    centroid = np.mean(ndf["embedding"].tolist(), axis=0)
-    centroids.append(",".join([str(x) for x in centroid]))
-    data.append(centroid)
-    usernames.append(username)
-    newage = 0
-    if age >= 21:
-        newage = 1
-    ages.append(newage)
+    user_feats = []
+    users = []
 
-total_time = time.time() - begin
-print(f"It took {total_time} to process.")
-print(np.array(data).shape)
-adf["user.name"] = usernames
-adf["labeled age"] = ages
-adf["centroid"] = centroids
-adf.to_csv("tweets_with_embedding_last_four.csv", index=False)
+    user_tweets: List[str]
+    pbar = tqdm.tqdm(jsonl_dset, desc="users processed")
+    for uname_in_fname, user_tweets in pbar:  # type: ignore[assignment]
+        pbar.set_description(f"len(users) users have tweets so far.")
+        uname_in_fname = uname_in_fname.lower()
+        if uname_in_fname not in expected_users:
+            logger.error(
+                f"{uname_in_fname} doesn't match any expected users given in CSV."
+            )
+            continue
+        if not user_tweets:
+            logger.warning(f"Empty file found in {uname_in_fname}.jsonl")
+            continue
 
-# from keras.utils import np_utils
-# from numpy import loadtxt
-# from keras.models import Sequential
-# from keras.layers import Dense
-# from sklearn.preprocessing import LabelEncoder
+        feats = []
+        for batch in chunked(user_tweets, batch_size):
+            _, _, hidden_states = pipeline(batch)
+            # Take last four layer
+            hidden_states = hidden_states[-4:]
 
-sys.stdout = backup
+            B, L, E = hidden_states[0].size()
+            with torch.no_grad():
+                # Flatten the representation.
+                flat = torch.cat(hidden_states, dim=-1)
+                assert list(flat.size()) == [B, L, E * 4]
+                # Take [CLS] representation
+                cls = flat[:, 0, :]
+                feats.append(cls)
+
+        # Concatenate along batch dim
+        all_feats = torch.cat(feats, dim=0)
+        pooled = all_feats.mean(dim=0).numpy()
+        user_feats.append(pooled)
+        users.append(uname_in_fname)
+
+    cat_user_feats = np.concatenate(user_feats, axis=0)
+    with (out_dir / "found_usernames.csv").open("w") as f:
+        f.writelines(u + "\n" for u in users)
+
+    with (out_dir / "user_tweet_centroids.npy").open("wb") as fb:
+        np.save(fb, cat_user_feats)
+
+
+if __name__ == "__main__":
+    typer.run(main)
+
+############## TESTS
