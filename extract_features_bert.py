@@ -51,44 +51,42 @@ def main(
     )
 
     user_feats = []
-    users = []
+    users: List[str] = []
 
     user_tweets: List[str]
     pbar = tqdm.tqdm(jsonl_dset, desc="users processed")
-    for uname_in_fname, user_tweets in pbar:  # type: ignore[assignment]
-        pbar.set_description(f"len(users) users have tweets so far.")
-        uname_in_fname = uname_in_fname.lower()
-        if uname_in_fname not in expected_users:
-            logger.error(
-                f"{uname_in_fname} doesn't match any expected users given in CSV."
-            )
-            continue
-        if not user_tweets:
-            logger.warning(f"Empty file found in {uname_in_fname}.jsonl")
-            continue
+    with torch.no_grad():
+        for uname_in_fname, user_tweets in pbar:  # type: ignore[assignment]
+            pbar.set_description(f"{len(users)} users found.")
+            uname_in_fname = uname_in_fname.lower()
+            if uname_in_fname not in expected_users:
+                logger.error(
+                    f"{uname_in_fname} doesn't match any expected users given in CSV."
+                )
+                continue
+            if not user_tweets:
+                logger.warning(f"Empty file found in {uname_in_fname}.jsonl")
+                continue
 
-        feats = []
-        for batch in chunked(user_tweets, batch_size):
-            _, _, hidden_states = pipeline(batch)
-            # Take last four layer
-            hidden_states = hidden_states[-4:]
+            feats = []
+            for batch in chunked(user_tweets, batch_size):
+                _, _, hidden_states = pipeline(batch)
+                # Take last four layer
+                hidden_states = hidden_states[-4:]
 
-            B, L, E = hidden_states[0].size()
-            with torch.no_grad():
                 # Flatten the representation.
                 flat = torch.cat(hidden_states, dim=-1)
-                assert list(flat.size()) == [B, L, E * 4]
                 # Take [CLS] representation
                 cls = flat[:, 0, :]
                 feats.append(cls)
 
-        # Concatenate along batch dim
-        all_feats = torch.cat(feats, dim=0)
-        pooled = all_feats.mean(dim=0).numpy()
-        user_feats.append(pooled)
-        users.append(uname_in_fname)
+            # Concatenate along batch dim
+            all_feats = torch.cat(feats, dim=0)
+            pooled = all_feats.mean(dim=0).cpu().numpy()
+            user_feats.append(pooled)
+            users.append(uname_in_fname)
 
-    cat_user_feats = np.concatenate(user_feats, axis=0)
+    cat_user_feats = np.stack(user_feats, axis=0)
     with (out_dir / "found_usernames.csv").open("w") as f:
         f.writelines(u + "\n" for u in users)
 
