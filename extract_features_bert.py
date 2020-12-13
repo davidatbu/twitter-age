@@ -1,3 +1,4 @@
+## Imports
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
@@ -29,6 +30,8 @@ from typing import Iterable, Iterator, List, Sequence, Tuple
 
 logger = Logger(__name__)
 
+##
+
 
 def get_last_layers_cls(texts: List[str], pipeline: Pipeline) -> torch.Tensor:
     _, _, hidden_states = pipeline(texts)
@@ -42,6 +45,26 @@ def get_last_layers_cls(texts: List[str], pipeline: Pipeline) -> torch.Tensor:
 
     return cls
 
+
+##
+
+if False:
+    ##
+    out_dir = Path(
+        "/projectnb/llamagrp/davidat/vaping/1.8million_users/age_predict_m3/Vaping_Handles_Geolocation(2017)"
+    )
+    json_dir = Path(
+        "/projectnb/llamagrp/davidat/vaping/1.8million_users/scraping_results/Vaping_Handles_Geolocation(2017)/jsonl"
+    )
+    users_csv = Path(
+        "/projectnb/llamagrp/davidat/vaping/1.8million_users/original_dump/Vaping_Handles_Geolocation(2017).csv"
+    )
+    batch_size = 100
+    mdl_name = "bert-base-uncased"
+
+##
+
+
 def main(
     out_dir: Path,
     users_csv: Path,
@@ -49,30 +72,42 @@ def main(
     batch_size: int = 100,
     mdl_name: str = "bert-base-uncased",
 ) -> None:
+    ##
     log_file = out_dir / "bert_feature_extract.log"
     logger.addHandler(FileHandler(log_file))
     logger.addHandler(StreamHandler())
 
+    if not json_dir.exists():
+        raise Exception()
+    if not out_dir.exists():
+        raise Exception()
+
     logger.info(
         f"Called with out_dir={out_dir}, users_csv={users_csv}, json_dir={json_dir}, batch_size={batch_size}"
     )
+    list(out_dir.iterdir())
 
     df_expected_users = pd.read_csv(users_csv, usecols=["Author"], na_filter=False)
-    expected_users = set(df_expected_users['Author'].str.strip('@').str.lower())
+    expected_users = set(df_expected_users["Author"].str.strip("@").str.lower())
+
+    ##
 
     # Filter out empty ones
     all_fpaths = list(json_dir.glob("*.jsonl"))
     fpaths = []
     with ThreadPoolExecutor(40) as executor:
         sizes = executor.map(os.path.getsize, all_fpaths)
-        for fpath, size in tqdm.tqdm(zip(all_fpaths, sizes), desc='checking file sizes.'):
+        for fpath, size in tqdm.tqdm(
+            zip(all_fpaths, sizes), desc="checking file sizes."
+        ):
             if size > 0:
-                 fpaths.append(fpath)
+                fpaths.append(fpath)
 
     jsonl_dset: Sequence[List[str]] = JsonlDataset(  # type: ignore[assignment]
-            fpaths,
+        fpaths,
         selector=make_selector("renderedContent"),
     )
+    ##
 
     pipeline = Pipeline(mdl_name)
     get_last_layers_cls_with_pipeline = partial(get_last_layers_cls, pipeline=pipeline)
@@ -80,7 +115,9 @@ def main(
     user_feats = []
     users: List[str] = []
 
+    ##
 
+    torch.no_grad()
     with torch.no_grad():
         pbar = tqdm.tqdm(
             pt_pack_unpack(get_last_layers_cls_with_pipeline, jsonl_dset, batch_size),
@@ -96,7 +133,6 @@ def main(
                 )
                 continue
 
-
             # Concatenate in the batch dim
             pooled = emb_per_tweet.detach().mean(dim=0).cpu()
             user_feats.append(pooled)
@@ -107,7 +143,9 @@ def main(
         f.writelines(u + "\n" for u in users)
 
     with (out_dir / "user_tweet_centroids.pth").open("wb") as fb:
-        torch.save( cat_user_feats, fb)
+        torch.save(cat_user_feats, fb)
+
+    ##
 
 
 if __name__ == "__main__":
